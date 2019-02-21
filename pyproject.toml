@@ -1,0 +1,77 @@
+[project]
+name = "fastapi-cicd-starter"
+version = "0.1.0"
+description = "A small FastAPI service (a URL shortener) with a complete GitHub Actions pipeline: lint, tests, Docker build, and zero-downtime deploys to Google Cloud Run or AWS Lambda."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "alembic==1.20.1",
+    "fastapi==0.162.0",
+    "jinja2==3.1.6",
+    "psycopg[binary]==3.3.6",
+    "pydantic-settings==2.16.2",
+    "sqlalchemy==2.1.6",
+    "uvicorn==0.54.0",
+]
+
+[dependency-groups]
+dev = [
+    "actionlint-py==1.7.12.25",
+    "httpx==0.28.1",
+    "httpx2==2.16.0",  # silences the TestClient deprecation warning in starlette 1.x
+    "mypy==2.4.1",
+    "pytest==9.2.0",
+    "pytest-cov==7.1.0",
+    "pyyaml==6.0.3",
+    "ruff==0.17.3",
+    "types-pyyaml==6.0.12.20260906",
+]
+
+# No build backend: this is an application, not a library. uv installs the
+# dependencies and the code runs from the repository (or /srv in the image).
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF", "PT", "DTZ"]
+ignore = ["S101"]  # assert is how pytest works
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S104", "S105", "S106", "S108", "S603", "S607"]
+"scripts/**" = ["S603", "S607"]
+"ops/**" = ["S603", "S310"]  # ops shells out to gcloud/aws/skopeo and fetches smoke-test URLs by design
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["app", "ops"]
+
+[[tool.mypy.overrides]]
+module = ["actionlint_py.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "postgres: needs DATABASE_URL to point at PostgreSQL (skipped otherwise)",
+]
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+source = ["app", "ops"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 90
+exclude_also = ["if TYPE_CHECKING:", "raise NotImplementedError"]
+[batch_insert]
+enabled = true
+[hash_password]
+enabled = true
