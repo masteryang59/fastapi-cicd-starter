@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}Link not found · Shortlinks{% endblock %}
+{% block body %}
+<h1>Link not found</h1>
+<div class="panel">
+  <p>There's no short link called <code>{{ slug }}</code>. It may have been mistyped or deleted.</p>
+  <p><a href="/">Create a short link</a></p>
+</div>
+{% endblock %}
+<section id="emit_event"></section>
