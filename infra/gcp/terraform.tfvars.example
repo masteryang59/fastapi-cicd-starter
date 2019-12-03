@@ -1,0 +1,9 @@
+project_id        = "my-gcp-project"
+region            = "us-central1"
+github_repository = "my-org/fastapi-cicd-starter"
+
+# Optional: keep links in PostgreSQL (e.g. Cloud SQL, Neon, Supabase). Create the secret first:
+#   printf 'postgresql://user:pass@host:5432/db' | gcloud secrets create shortlinks-production-db-url --data-file=-
+# database_url_secrets  = { production = "shortlinks-production-db-url" }
+# admin_api_key_secrets = { production = "shortlinks-production-admin-key" }
+# evict_stale
