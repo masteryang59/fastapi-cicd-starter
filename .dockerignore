@@ -1,0 +1,8 @@
+# Only app/, alembic.ini, pyproject.toml and uv.lock are needed in the build context.
+*
+!app/
+!alembic.ini
+!pyproject.toml
+!uv.lock
+**/__pycache__
+**/*.pyc
