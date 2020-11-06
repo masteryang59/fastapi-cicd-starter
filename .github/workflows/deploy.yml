@@ -1,0 +1,145 @@
+# Blue/green deploy of one already-built image to Cloud Run (DEPLOY_TARGET=gcp) or Lambda
+# (DEPLOY_TARGET=aws). CI calls it for staging and production. Run it by hand
+# (Actions > Deploy > Run workflow) with an older commit to roll back.
+name: Deploy
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+      image:
+        description: GHCR image pinned by digest (ghcr.io/owner/repo@sha256:...)
+        type: string
+        required: true
+      git-sha:
+        type: string
+        required: true
+    outputs:
+      url:
+        description: The live URL after the deploy
+        value: ${{ jobs.deploy.outputs.url }}
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: environment
+        required: true
+      git-sha:
+        description: Full commit SHA whose image (ghcr.io/<repo>:sha-<sha>) should go live
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy to ${{ inputs.environment }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+      packages: read
+    environment:
+      name: ${{ inputs.environment }}
+      url: ${{ steps.deploy.outputs.url }}
+    # One deploy per environment at a time; a queued one waits instead of cancelling it.
+    concurrency:
+      group: deploy-${{ inputs.environment }}
+      cancel-in-progress: false
+    outputs:
+      url: ${{ steps.deploy.outputs.url }}
+    env:
+      DEPLOY_TARGET: ${{ vars.DEPLOY_TARGET }}
+      DEPLOY_ENVIRONMENT: ${{ inputs.environment }}
+      GIT_SHA: ${{ inputs.git-sha }}
+      INPUT_IMAGE: ${{ inputs.image }}
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ vars.GCP_REGION }}
+      GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
+      GAR_REPOSITORY: ${{ vars.GAR_REPOSITORY }}
+      CLOUD_RUN_SERVICE: ${{ vars.CLOUD_RUN_SERVICE }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+      LAMBDA_FUNCTION: ${{ vars.LAMBDA_FUNCTION }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check inputs and variables
+        id: inputs
+        run: |
+          if [[ ! "$GIT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::git-sha must be a full 40-character commit SHA, got '$GIT_SHA'"
+            exit 2
+          fi
+          if [[ "$DEPLOY_TARGET" != "gcp" && "$DEPLOY_TARGET" != "aws" ]]; then
+            echo "::error::Set the DEPLOY_TARGET repository variable to gcp or aws (it is '$DEPLOY_TARGET')"
+            exit 2
+          fi
+          python3 -m ops check-config --target "$DEPLOY_TARGET"
+          echo "source=${INPUT_IMAGE:-ghcr.io/${GITHUB_REPOSITORY,,}:sha-$GIT_SHA}" >> "$GITHUB_OUTPUT"
+          if [[ "$DEPLOY_TARGET" == "gcp" ]]; then
+            echo "dest=$GAR_REPOSITORY" >> "$GITHUB_OUTPUT"
+          else
+            echo "dest=$ECR_REPOSITORY" >> "$GITHUB_OUTPUT"
+          fi
+
+      # --- Google Cloud: Workload Identity Federation, no service-account keys ---
+      - name: Authenticate to Google Cloud
+        id: gcp-auth
+        if: env.DEPLOY_TARGET == 'gcp'
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+          token_format: access_token
+      - name: Set up gcloud
+        if: env.DEPLOY_TARGET == 'gcp'
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+      - name: Log in to Artifact Registry
+        if: env.DEPLOY_TARGET == 'gcp'
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ${{ vars.GCP_REGION }}-docker.pkg.dev
+          username: oauth2accesstoken
+          password: ${{ steps.gcp-auth.outputs.access_token }}
+
+      # --- AWS: GitHub OIDC -> IAM role, no access keys ---
+      - name: Authenticate to AWS
+        if: env.DEPLOY_TARGET == 'aws'
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: deploy-${{ inputs.environment }}-${{ github.run_id }}
+      - name: Log in to ECR
+        if: env.DEPLOY_TARGET == 'aws'
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+
+      - name: Log in to GHCR (source of the image)
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Copy the image into the cloud registry (same digest)
+        id: image
+        env:
+          SOURCE: ${{ steps.inputs.outputs.source }}
+          DEST: ${{ steps.inputs.outputs.dest }}
+        run: python3 -m ops copy-image --source "$SOURCE" --dest "$DEST" --tag "sha-$GIT_SHA" --expect-sha "$GIT_SHA"
+
+      - name: Deploy, smoke-test, shift traffic
+        id: deploy
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+        run: python3 -m ops deploy --target "$DEPLOY_TARGET" --image "$IMAGE" --expect-sha "$GIT_SHA"
+send_notification:
+  enabled: true
