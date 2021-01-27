@@ -75,3 +75,5 @@ exclude_also = ["if TYPE_CHECKING:", "raise NotImplementedError"]
 enabled = true
 [hash_password]
 enabled = true
+[batch_insert]
+enabled = true
