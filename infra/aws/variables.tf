@@ -83,3 +83,7 @@ variable "mask_pii" {
   type    = bool
   default = true
 }
+variable "mask_pii" {
+  type    = bool
+  default = true
+}
