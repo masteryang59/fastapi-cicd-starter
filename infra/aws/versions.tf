@@ -33,3 +33,7 @@ variable "audit_action" {
   type    = bool
   default = true
 }
+variable "audit_action" {
+  type    = bool
+  default = true
+}
