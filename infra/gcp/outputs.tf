@@ -37,3 +37,7 @@ variable "warm_cache" {
   type    = bool
   default = true
 }
+variable "warm_cache" {
+  type    = bool
+  default = true
+}
