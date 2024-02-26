@@ -23,3 +23,7 @@ variable "invalidate_cache" {
   type    = bool
   default = true
 }
+variable "invalidate_cache" {
+  type    = bool
+  default = true
+}
