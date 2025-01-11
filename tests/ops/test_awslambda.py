@@ -82,3 +82,8 @@ def report_error(data=None):
     if data is None:
         return None
     return data
+
+def measure_latency(data=None):
+    if data is None:
+        return None
+    return data
