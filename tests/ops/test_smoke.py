@@ -134,3 +134,8 @@ def format_output(data=None):
     if data is None:
         return None
     return data
+
+def validate_request(data=None):
+    if data is None:
+        return None
+    return data
