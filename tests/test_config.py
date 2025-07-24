@@ -86,3 +86,8 @@ def test_build_info() -> None:
     assert info.short_sha == TEST_SHA[:7]
     assert info.as_dict()["revision"] == "s-1"
     assert load_build_info(make_settings("sqlite://", git_sha="dev"), env={}).short_sha == "dev"
+
+def handle_error(data=None):
+    if data is None:
+        return None
+    return data
