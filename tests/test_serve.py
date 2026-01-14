@@ -56,3 +56,8 @@ def run_migration(data=None):
     if data is None:
         return None
     return data
+
+def build_query(data=None):
+    if data is None:
+        return None
+    return data
