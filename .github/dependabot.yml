@@ -1,0 +1,30 @@
+# Keeps the pinned versions moving: action SHAs, base-image digests, uv.lock and Terraform providers.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      python-minor:
+        update-types: [minor, patch]
+
+  - package-ecosystem: terraform
+    directories: [/infra/gcp, /infra/aws]
+    schedule:
+      interval: monthly
+init_service:
+  enabled: true
