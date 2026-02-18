@@ -1,0 +1,209 @@
+# Every pull request: lint, type-check, test (SQLite and PostgreSQL), build and smoke-test the image.
+# Every push to main: the same, then push the image to GHCR and roll it out to staging,
+# then production (production waits for a reviewer if the environment requires one).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # Superseded PR runs are cancelled. A main run is never cancelled halfway through a deploy.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  UV_VERSION: "0.13.6"
+  PYTHON_VERSION: "3.12"
+  PUBLISH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+jobs:
+  lint:
+    name: Lint and type-check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+      - name: Install dependencies (fails if uv.lock is out of date)
+        run: uv sync --locked
+      - name: Ruff lint
+        run: uv run ruff check --output-format=github .
+      - name: Ruff format
+        run: uv run ruff format --check .
+      - name: Mypy (strict)
+        run: uv run mypy
+      - name: Lint workflows (actionlint + shellcheck)
+        run: uv run actionlint -color
+      - name: Audit runtime dependencies for known vulnerabilities
+        run: |
+          uv export --frozen --no-dev --no-emit-project --format requirements-txt -o "$RUNNER_TEMP/requirements.txt"
+          uvx --from pip-audit==2.10.1 pip-audit --strict --disable-pip -r "$RUNNER_TEMP/requirements.txt"
+
+  test:
+    name: Test (Python ${{ matrix.python }}, ${{ matrix.database }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { python: "3.12", database: sqlite }
+          - { python: "3.13", database: sqlite }
+          - { python: "3.12", database: postgres }
+    services:
+      postgres:
+        # An empty image name means the service isn't started (the SQLite legs).
+        image: ${{ matrix.database == 'postgres' && 'postgres:17-alpine@sha256:266d3c257594e195b309ae9d1805e54c788f1d7b375f56bf6c367aac6c917e7b' || '' }}
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: shortlinks
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app -d shortlinks"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      # Unset for SQLite: the tests then use a temporary SQLite file per run.
+      DATABASE_URL: ${{ matrix.database == 'postgres' && 'postgresql://app:app@localhost:5432/shortlinks' || '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+      - run: uv sync --locked
+      - name: Tests with coverage (fails under 90%)
+        run: uv run pytest --cov --cov-report=term --cov-report=xml --junitxml=junit.xml
+      - name: Migrations match the models
+        env:
+          DATABASE_URL: ${{ env.DATABASE_URL || 'sqlite:///./data/check.db' }}
+        run: |
+          uv run alembic upgrade head
+          uv run alembic check
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-reports-py${{ matrix.python }}-${{ matrix.database }}
+          path: |
+            coverage.xml
+            junit.xml
+          retention-days: 14
+          if-no-files-found: ignore
+
+  image:
+    name: Build, smoke-test and publish the image
+    needs: [lint, test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write # push to GHCR (main only)
+    outputs:
+      repository: ${{ steps.meta.outputs.repository }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Lint the Dockerfile (hadolint)
+        run: docker run --rm -i hadolint/hadolint:v2.14.0@sha256:27086352fd5e1907ea2b934eb1023f217c5ae087992eb59fde121dce9c9ff21e < Dockerfile
+      - name: Image metadata
+        id: meta
+        run: |
+          echo "repository=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "version=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)" >> "$GITHUB_OUTPUT"
+          echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Log in to GHCR
+        if: env.PUBLISH == 'true'
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Built once. On main the image is pushed, and the smoke test below runs the pushed
+      # digest, so what was tested is exactly what gets deployed.
+      - name: Build
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          push: ${{ env.PUBLISH == 'true' }}
+          load: ${{ env.PUBLISH != 'true' }}
+          tags: ${{ steps.meta.outputs.repository }}:sha-${{ github.sha }}
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            APP_VERSION=${{ steps.meta.outputs.version }}
+            BUILD_TIME=${{ steps.meta.outputs.created }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Lambda rejects image indexes, and attestations turn the image into one.
+          provenance: false
+          sbom: false
+      - name: Smoke-test the container (read-only root filesystem, like Lambda)
+        env:
+          IMAGE: ${{ env.PUBLISH == 'true' && format('{0}@{1}', steps.meta.outputs.repository, steps.build.outputs.digest) || format('{0}:sha-{1}', steps.meta.outputs.repository, github.sha) }}
+        run: |
+          docker run -d --name app -p 8080:8080 --read-only --tmpfs /tmp -e ENVIRONMENT=ci "$IMAGE"
+          python3 -m ops smoke --url http://127.0.0.1:8080 --expect-sha "$GITHUB_SHA" --deadline 60
+      - name: Container logs
+        if: always()
+        run: docker logs app 2>&1 || true
+      - name: Move the main tag to this image
+        if: env.PUBLISH == 'true'
+        env:
+          REPOSITORY: ${{ steps.meta.outputs.repository }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: skopeo copy --preserve-digests "docker://$REPOSITORY@$DIGEST" "docker://$REPOSITORY:main"
+      - name: Note when deploys are off
+        if: env.PUBLISH == 'true' && vars.DEPLOY_TARGET == ''
+        run: echo "::notice title=Deploy skipped::Set the DEPLOY_TARGET repository variable to gcp or aws to deploy (see README)."
+
+  deploy-staging:
+    name: Staging
+    needs: image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DEPLOY_TARGET != ''
+    permissions:
+      contents: read
+      id-token: write # OIDC: short-lived cloud credentials, no stored keys
+      packages: read
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: staging
+      image: ${{ needs.image.outputs.repository }}@${{ needs.image.outputs.digest }}
+      git-sha: ${{ github.sha }}
+
+  deploy-production:
+    name: Production
+    needs: [image, deploy-staging]
+    permissions:
+      contents: read
+      id-token: write
+      packages: read
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: production
+      image: ${{ needs.image.outputs.repository }}@${{ needs.image.outputs.digest }}
+      git-sha: ${{ github.sha }}
+log_event:
+  enabled: true
+cleanup_resources:
+  enabled: true
