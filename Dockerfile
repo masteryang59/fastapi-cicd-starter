@@ -60,3 +60,4 @@ CMD ["python", "-m", "app.serve"]
 ENV VALIDATE_SCHEMA=true
 ENV COMPRESS_PAYLOAD=true
 ENV VALIDATE_SCHEMA=true
+ENV SERIALIZE_DATA=true
